@@ -1,3 +1,4 @@
+
 # ==================================
 #!/usr/bin/env python
 # coding: utf-8
@@ -29,6 +30,7 @@ def _install_():
         'colorama': 'colorama',
         'pystyle': 'pystyle',
         'urllib3': 'urllib3',
+        'flask': 'flask',
     }
     _pkgs=[pkg_name for pkg_name in _list_ if not itls(pkg_name)]
     if _pkgs:
@@ -65,11 +67,15 @@ import requests, urllib3
 from requests.exceptions import ProxyError
 from colorama import init, Back, Style
 from typing import Optional, List
+from flask import Flask, render_template, request, jsonify, session
+from io import StringIO
+
 PRINT_LOCK=threading.RLock()
 def sfprint(*args, **kwargs):
     with PRINT_LOCK:
         print(*args, **kwargs)
         sys.stdout.flush()
+
 class xColor:
     YELLOW='\033[38;2;255;223;15m'
     GREEN='\033[38;2;0;209;35m'
@@ -97,6 +103,7 @@ class xColor:
     NEON_BLUE='\033[38;2;31;81;255m'
     WHITE='\033[38;2;255;255;255m'
     RESET='\033[0m'
+
 class zLocket:
     def __init__(self, device_token: str="", target_friend_uid: str="", num_threads: int=1, note_target: str=""):
         self.FIREBASE_GMPID="1:641029076083:ios:cc8eb46290d69b234fa606"
@@ -614,24 +621,180 @@ class zLocket:
         except ValueError:
             self.messages.append("Lỗi kết nối tới API Url.ThanhDieu.Com")
             return ""
+
+# Web Interface Classes
+class WebOutput:
+    def __init__(self):
+        self.messages = []
+    
+    def write(self, text):
+        if text.strip():
+            self.messages.append(text.strip())
+    
+    def flush(self):
+        pass
+    
+    def get_messages(self):
+        return self.messages[-50:]  # Return last 50 messages
+
+# Global variables for Flask app
+app = Flask(__name__)
+app.secret_key = os.urandom(24)
+web_output = WebOutput()
+tool_running = False
+tool_thread = None
+
+# Flask routes
+@app.route('/')
+def index():
+    return render_template('index.html')
+
+@app.route('/start_tool', methods=['POST'])
+def start_tool():
+    global tool_running, tool_thread, config
+    
+    if tool_running:
+        return jsonify({'status': 'error', 'message': 'Tool is already running'})
+    
+    data = request.json
+    target = data.get('target', '')
+    custom_name = data.get('custom_name', 'zLocket Tool Pro')
+    use_emoji = data.get('use_emoji', True)
+    
+    if not target:
+        return jsonify({'status': 'error', 'message': 'Target is required'})
+    
+    # Redirect stdout to capture output
+    sys.stdout = web_output
+    
+    def run_tool():
+        global tool_running, config
+        try:
+            tool_running = True
+            
+            # Tạo config instance
+            web_output.write("Initializing configuration...")
+            config = zLocket()
+            
+            # Set configuration from web input
+            url = target.strip()
+            if not url.startswith(("http://", "https://")) and not url.startswith("locket."):
+                url = f"https://locket.cam/{url}"
+            if url.startswith("locket."):
+                url = f"https://{url}"
+            
+            uid = config._extract_uid_locket(url)
+            if uid:
+                config.TARGET_FRIEND_UID = uid
+                config.NAME_TOOL = custom_name
+                config.USE_EMOJI = use_emoji
+                
+                web_output.write(f"Tool started with target UID: {uid}")
+                web_output.write(f"Custom name: {custom_name}")
+                web_output.write(f"Emoji enabled: {use_emoji}")
+                
+                # Khởi tạo proxy và spam
+                web_output.write("Initializing proxy system...")
+                proxy_queue, num_threads = init_proxy()
+                
+                # Giảm số thread để tránh quá tải
+                num_threads = min(num_threads, 20)
+                web_output.write(f"Starting {num_threads} spam threads...")
+                
+                stop_event = threading.Event()
+                threads = []
+                
+                # Tạo và chạy các thread spam
+                for i in range(num_threads):
+                    if not tool_running:  # Kiểm tra nếu user đã stop
+                        break
+                    thread = threading.Thread(
+                        target=step1_create_account,
+                        args=(i, proxy_queue, stop_event)
+                    )
+                    threads.append(thread)
+                    thread.daemon = True
+                    thread.start()
+                    
+                    if i % 5 == 0:
+                        web_output.write(f"Started {i+1}/{num_threads} threads...")
+                
+                web_output.write("All spam threads activated!")
+                web_output.write("Spam is running... Click Stop to terminate.")
+                
+                # Chờ cho đến khi tool_running = False hoặc threads kết thúc
+                while tool_running and any(t.is_alive() for t in threads):
+                    time.sleep(1)
+                
+                # Dừng tất cả threads
+                stop_event.set()
+                web_output.write("Stopping all threads...")
+                
+                for thread in threads:
+                    thread.join(timeout=2)
+                
+                web_output.write("All threads stopped.")
+                
+            else:
+                web_output.write("Failed to extract UID from target")
+                
+        except Exception as e:
+            web_output.write(f"Error: {str(e)}")
+            import traceback
+            web_output.write(f"Traceback: {traceback.format_exc()}")
+        finally:
+            tool_running = False
+    
+    tool_thread = threading.Thread(target=run_tool)
+    tool_thread.start()
+    
+    return jsonify({'status': 'success', 'message': 'Tool started'})
+
+@app.route('/stop_tool', methods=['POST'])
+def stop_tool():
+    global tool_running
+    tool_running = False
+    return jsonify({'status': 'success', 'message': 'Tool stopped'})
+
+@app.route('/get_output')
+def get_output():
+    return jsonify({
+        'messages': web_output.get_messages(),
+        'running': tool_running
+    })
+
+@app.route('/status')
+def status():
+    return jsonify({'running': tool_running})
+
+# Helper functions
 def _print(*args, **kwargs):
     return config._print(*args, **kwargs)
+
 def _loader_(message, duration=3):
     return config._loader_(message, duration)
+
 def _sequence_(message, duration=1.5, char_set="0123456789ABCDEF"):
     return config._sequence_(message, duration, char_set)
+
 def _randchar_(duration=2):
     return config._randchar_(duration)
+
 def _blinking_(text, blinks=3, delay=0.1):
     return config._blinking_(text, blinks, delay)
+
 def _rand_str_(length=10, chars=string.ascii_lowercase + string.digits):
     return ''.join(random.choice(chars) for _ in range(length))
+
 def _rand_name_():
     return _rand_str_(8, chars=string.ascii_lowercase)
+
 def _rand_email_():
     return f"{_rand_str_(15)}@thanhdieu.com"
+
 def _rand_pw_():
     return 'zlocket' + _rand_str_(4)
+
 def _clear_():
     try:
         os.system('cls' if os.name == 'nt' else 'clear')
@@ -639,6 +802,7 @@ def _clear_():
         with PRINT_LOCK:
             print("\033[2J\033[H", end="")
             sys.stdout.flush()
+
 def typing_print(text, delay=0.02):
     with PRINT_LOCK:
         for char in text:
@@ -646,6 +810,7 @@ def typing_print(text, delay=0.02):
             sys.stdout.flush()
             time.sleep(delay)
         print()
+
 def _matrix_():
     matrix_chars="01"
     lines=5
@@ -660,6 +825,7 @@ def _matrix_():
                     line+=" "
             print(line)
         time.sleep(0.2)
+
 def _banner_():
     try:
         wterm=os.get_terminal_size().columns
@@ -689,6 +855,7 @@ def _banner_():
     banner="\n" + "\n".join(centered) + "\n"
     with PRINT_LOCK:
         sfprint(banner)
+
 def _stats_():
     elapsed=time.time() - config.start_time
     hours, remainder=divmod(int(elapsed), 3600)
@@ -706,6 +873,7 @@ def _stats_():
 {xColor.CYAN}└─────────────────────────────────────────────────────────────┘{xColor.CYAN}
 """
     return stats
+
 def load_proxies():
     proxies=[]
     proxy_urls=config.PROXY_LIST
@@ -745,6 +913,7 @@ def load_proxies():
     config._print(
         f"{xColor.GREEN}[+] {xColor.CYAN}Proxy harvesting complete{xColor.WHITE} {len(proxies)} {xColor.CYAN}unique proxies loaded")
     return proxies
+
 def init_proxy():
     proxies = load_proxies()
     if not proxies:
@@ -765,6 +934,7 @@ def init_proxy():
     num_threads = len(proxies)
     config._print(f"{xColor.GREEN}[+] {xColor.CYAN}Proxy system initialized with {xColor.WHITE}{num_threads} {xColor.CYAN}endpoints")
     return proxy_queue, num_threads
+
 def format_proxy(proxy_str):
     if not proxy_str:
         return None
@@ -776,6 +946,7 @@ def format_proxy(proxy_str):
         config._print(
             f"{xColor.RED}[!] {xColor.YELLOW}Proxy format error: {e}")
         return None
+
 def get_proxy(proxy_queue, thread_id, stop_event=None):
     try:
         if stop_event is not None and stop_event.is_set():
@@ -787,8 +958,10 @@ def get_proxy(proxy_queue, thread_id, stop_event=None):
             config._print(
                 f"{xColor.RED}[Thread-{thread_id:03d}] {xColor.YELLOW}Proxy pool exhausted")
         return None
+
 def excute(url, headers=None, payload=None, thread_id=None, step=None, proxies_dict=None):
     return config.excute(url, headers, payload, thread_id, step, proxies_dict)
+
 def step1b_sign_in(email, password, thread_id, proxies_dict):
     if not email or not password:
         config._print(
@@ -815,28 +988,13 @@ def step1b_sign_in(email, password, thread_id, proxies_dict):
     config._print(
         f"[{xColor.CYAN}Thread-{thread_id:03d}{Style.RESET_ALL} | {xColor.MAGENTA}Auth{Style.RESET_ALL}] {xColor.RED}[✗] Authentication failed")
     return None
+
 def step2_finalize_user(id_token, thread_id, proxies_dict):
     if not id_token:
         config._print(
             f"[{xColor.CYAN}Thread-{thread_id:03d}{Style.RESET_ALL} | {xColor.MAGENTA}Profile{Style.RESET_ALL}] {xColor.RED}[✗] Profile creation failed: Invalid token")
         return False
     first_name=config.NAME_TOOL
-    # if config.USE_EMOJI:
-    #     last_name=' '.join(random.sample([
-    #     '😀', '😂', '😍', '🥰', '😊', '😇', '😚', '😘', '😻', '😽', '🤗',
-    #     '😎', '🥳', '😜', '🤩', '😢', '😡', '😴', '🙈', '🙌', '💖', '🔥', '👍',
-    #     '✨', '🌟', '🍎', '🍕', '🚀', '🎉', '🎈', '🌈', '🐶', '🐱', '🦁',
-    #     '😋', '😬', '😳', '😷', '🤓', '😈', '👻', '💪', '👏', '🙏', '💕', '💔',
-    #     '🌹', '🍒', '🍉', '🍔', '🍟', '☕', '🍷', '🎂', '🎁', '🎄', '🎃', '🔔',
-    #     '⚡', '💡', '📚', '✈️', '🚗', '🏠', '⛰️', '🌊', '☀️', '☁️', '❄️', '🌙',
-    #     '🐻', '🐼', '🐸', '🐝', '🦄', '🐙', '🦋', '🌸', '🌺', '🌴', '🏀', '⚽', '🎸'
-    #     ], 5))
-    # else:
-    #     last_name='ccc'
-    # if config.NAME_TOOL and config.NAME_TOOL.strip():
-    #     first_name=config.NAME_TOOL[:12]
-    #     if len(config.NAME_TOOL) > 12:
-    #         last_name=config.NAME_TOOL[12:24]
     last_name=' '.join(random.sample([
         '😀', '😂', '😍', '🥰', '😊', '😇', '😚', '😘', '😻', '😽', '🤗',
         '😎', '🥳', '😜', '🤩', '😢', '😡', '😴', '🙈', '🙌', '💖', '🔥', '👍',
@@ -872,6 +1030,7 @@ def step2_finalize_user(id_token, thread_id, proxies_dict):
     config._print(
         f"[{xColor.CYAN}Thread-{thread_id:03d}{Style.RESET_ALL} | {xColor.MAGENTA}Profile{Style.RESET_ALL}] {xColor.RED}[✗] Profile creation failed")
     return False
+
 def step3_send_friend_request(id_token, thread_id, proxies_dict):
     if not id_token:
         config._print(
@@ -908,6 +1067,7 @@ def step3_send_friend_request(id_token, thread_id, proxies_dict):
     config._print(
         f"[{xColor.CYAN}Thread-{thread_id:03d}{Style.RESET_ALL} | {xColor.MAGENTA}Friend{Style.RESET_ALL}] {xColor.RED}[✗] Connection failed")
     return False
+
 def _cd_(message, count=5, delay=0.2):
     for i in range(count, 0, -1):
         binary=bin(i)[2:].zfill(8)
@@ -918,6 +1078,7 @@ def _cd_(message, count=5, delay=0.2):
     sys.stdout.write(
         f"\r{xColor.CYAN}[{xColor.WHITE}*{xColor.CYAN}] {xColor.GREEN}{message} {xColor.GREEN}READY      \n")
     sys.stdout.flush()
+
 def step1_create_account(thread_id, proxy_queue, stop_event):
     while not stop_event.is_set():
         current_proxy=get_proxy(proxy_queue, thread_id, stop_event)
@@ -1025,24 +1186,8 @@ def step1_create_account(thread_id, proxy_queue, stop_event):
         else:
             config._print(
                 f"[{xColor.CYAN}Thread-{thread_id:03d}{Style.RESET_ALL}] {xColor.YELLOW}● Proxy limit reached ({proxy_usage_count}/{config.ACCOUNTS_PER_PROXY}), getting new proxy")
-# def stop_tool(stop_event):
-#     stop_event.set()
-#     for thread in threading.enumerate():
-#         if thread != threading.current_thread() and not thread.daemon:
-#             try:
-#                 if hasattr(thread, "_stop"):
-#                     thread._stop()
-#             except:
-#                 pass
-#     with PRINT_LOCK:
-#         config._print(f"\n{xColor.RED}[!] {xColor.WHITE}STOPPING TOOL - USER INTERRUPTED")
-#         config._print(_stats_())
-#         config._print(f"{xColor.GREEN}[+] {xColor.CYAN}Operation complete.")
-#         config._print(f"{xColor.CYAN}{Style.BRIGHT}{'=' * 65}{Style.RESET_ALL}")
-#         config._blinking_("CONNECTION TERMINATED", blinks=7)
-#         sys.stdout.flush()
-#     os._exit(0)
-def main():
+
+def original_main():
     config.start_time=time.time()
     config.setup()
     _clear_()
@@ -1130,6 +1275,12 @@ def main():
     config._blinking_("TOOL HAS BEEN SHUT DOWN", blinks=20)
     sys.stdout.flush()
     os._exit(0)
+
 if __name__ == "__main__":
-    config=zLocket()
-    main()
+    config = zLocket()
+    
+    # Kiểm tra nếu có tham số dòng lệnh để chạy web mode
+    if len(sys.argv) > 1 and sys.argv[1] == "web":
+        app.run(host='0.0.0.0', port=5000, debug=True)
+    else:
+        original_main()
